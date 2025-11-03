@@ -479,6 +479,157 @@ echo RUN.SH COMPLETE !#!#
     return
 
 
+def run_scenario_in_apptainer(
+    work_dir: str, env: Dict[str, str], timeout: int = TASK_TIMEOUT, sif_path: Optional[str] = None
+) -> None:
+    """
+    Run a scenario inside an Apptainer/Singularity container.
+
+    Args:
+        work_dir (path): the path to the working directory previously created to house this scenario instance
+        timeout (Optional, int): number of seconds to allow the container to run (used only inside run.sh)
+        sif_path (Optional, str): path to the .sif image. Falls back to $APPTAINER_SIF or $SINGULARITY_SIF
+    """
+
+    # Resolve the container runtime binary
+    apptainer_bin = shutil.which("apptainer") or shutil.which("singularity")
+    if apptainer_bin is None:
+        raise RuntimeError(
+            "Apptainer/Singularity not found in PATH. Install it or set CONTAINER_RUNTIME=docker with a reachable daemon."
+        )
+
+    # Resolve the SIF image path
+    if sif_path is None or sif_path.strip() == "":
+        sif_path = os.environ.get("APPTAINER_SIF") or os.environ.get("SINGULARITY_SIF")
+    if sif_path is None or not os.path.isfile(sif_path):
+        raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), str(sif_path))
+
+    # Prepare the run script
+    with open(os.path.join(work_dir, "run.sh"), "wt", newline="\n") as f:
+        f.write(
+            f"""#
+echo RUN.SH STARTING !#!#
+export AUTOGEN_TESTBED_SETTING="Apptainer"
+
+umask 000
+echo "agbench version: {__version__}" > timestamp.txt
+
+# Run the global init script if it exists
+if [ -f global_init.sh ] ; then
+    . ./global_init.sh
+fi
+
+# Run the scenario init script if it exists
+if [ -f scenario_init.sh ] ; then
+    . ./scenario_init.sh
+fi
+
+# Run the scenario
+df -h
+python -m venv .agbench_venv
+. .agbench_venv/bin/activate
+export TMPDIR=/workspace/tmp
+mkdir -p "$TMPDIR" /workspace/.cache/pip /workspace/.cache/ms-playwright
+export PIP_CACHE_DIR=/workspace/.cache/pip
+export XDG_CACHE_HOME=/workspace/.cache
+export PLAYWRIGHT_BROWSERS_PATH=/workspace/.cache/ms-playwright
+export PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=1
+pip install --no-cache-dir -r requirements.txt
+python -m playwright install chromium
+echo SCENARIO.PY STARTING !#!#
+start_time=$(date +%s)
+timeout --preserve-status --kill-after {timeout  + 30}s {timeout}s python scenario.py
+end_time=$(date +%s)
+EXIT_CODE=$?
+if [ $EXIT_CODE -ne 0 ]; then
+    echo SCENARIO.PY EXITED WITH CODE: $EXIT_CODE !#!#
+else
+    echo SCENARIO.PY COMPLETE !#!#
+fi
+elapsed_time=$((end_time - start_time))
+echo "SCENARIO.PY RUNTIME: $elapsed_time !#!#"
+
+# Run the scenario finalize script if it exists
+if [ -f scenario_finalize.sh ] ; then
+    . ./scenario_finalize.sh
+fi
+
+# Run the global finalize script if it exists
+if [ -f global_finalize.sh ] ; then
+    . ./global_finalize.sh
+fi
+
+# Clean up (remove caches, venv, and tmp)
+if [ -d .cache ] ; then
+    rm -Rf .cache
+fi
+if [ -d __pycache__ ] ; then
+    rm -Rf __pycache__
+fi
+if [ -d .agbench_venv ] ; then
+    rm -Rf .agbench_venv
+fi
+if [ -n "$TMPDIR" ] && [ -d "$TMPDIR" ] ; then
+    rm -Rf "$TMPDIR"
+fi
+
+echo RUN.SH COMPLETE !#!#
+"""
+        )
+
+    # Determine binds
+    binds: List[str] = []
+    abs_work_dir = str(pathlib.Path(work_dir).absolute())
+    binds.append(f"{abs_work_dir}:/workspace")
+
+    # Add the autogen repo if we can find it
+    autogen_repo_base = os.environ.get("AUTOGEN_REPO_BASE")
+    if autogen_repo_base is None:
+        autogen_repo_base = find_autogen_repo(os.getcwd())
+    elif not os.path.isdir(autogen_repo_base):
+        raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), autogen_repo_base)
+
+    if autogen_repo_base is None:
+        raise ValueError(
+            "Could not find AutoGen repo base. Please set the environment variable AUTOGEN_REPO_BASE to the correct value."
+        )
+
+    autogen_python_dir = os.path.join(autogen_repo_base, "python")
+    binds.append(f"{str(pathlib.Path(autogen_python_dir).absolute())}:/autogen_python")
+
+    print("Mounting:")
+    for b in binds:
+        host, container = b.split(":", 1)
+        label = os.path.relpath(host) if container == "/workspace" else host
+        print(f"[RW]\t'{label}' => '{container}'")
+    print("===================================================================")
+
+    # Build environment flags for Apptainer
+    env_flags: List[str] = []
+    for k, v in env.items():
+        env_flags.extend(["--env", f"{k}={v}"])
+
+    # Compose command
+    cmd: List[str] = [apptainer_bin, "exec", "--containall", "--cleanenv", "--pwd", "/workspace", "--home", "/workspace"]
+    for b in binds:
+        cmd.extend(["--bind", b])
+    cmd.extend(env_flags)
+    cmd.extend([sif_path, "sh", "/workspace/run.sh"])
+
+    # Run and stream logs
+    log_path = os.path.join(work_dir, "console_log.txt")
+    with open(log_path, "wb") as f:
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        for c in iter(lambda: process.stdout.read(1), b""):  # type: ignore
+            f.write(c)
+            os.write(sys.stdout.fileno(), c)
+
+    return
+
 def run_scenario_in_docker(
     work_dir: str, env: Dict[str, str], timeout: int = TASK_TIMEOUT, docker_image: Optional[str] = None
 ) -> None:
@@ -489,8 +640,31 @@ def run_scenario_in_docker(
         work_dir (path): the path to the working directory previously created to house this sceario instance
         timeout (Optional, int): the number of seconds to allow a Docker container to run before timing out
     """
+    # Allow explicit selection of Apptainer via env
+    runtime = os.environ.get("CONTAINER_RUNTIME", "docker").strip().lower()
+    if runtime in ("apptainer", "singularity"):
+        run_scenario_in_apptainer(
+            work_dir,
+            env,
+            timeout=timeout,
+            sif_path=os.environ.get("APPTAINER_SIF") or os.environ.get("SINGULARITY_SIF"),
+        )
+        return
 
-    client = docker.from_env()
+    # Otherwise try Docker, and fall back to Apptainer if Docker is unavailable
+    try:
+        client = docker.from_env()
+    except DockerException:
+        print("Docker daemon not reachable. Falling back to Apptainer if available...")
+        run_scenario_in_apptainer(
+            work_dir,
+            env,
+            timeout=timeout,
+            sif_path=os.environ.get("APPTAINER_SIF") or os.environ.get("SINGULARITY_SIF"),
+        )
+        return
+    print(client)
+    print(client.images.list())
     image = None
 
     # If the docker_image is None, then we will fetch DEFAULT_DOCKER_IMAGE_TAG, if present,

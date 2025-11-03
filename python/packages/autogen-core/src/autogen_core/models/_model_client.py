@@ -22,6 +22,8 @@ class ModelFamily:
     GPT_41 = "gpt-41"
     GPT_45 = "gpt-45"
     GPT_4O = "gpt-4o"
+    QWEN3 = "qwen3:32b"
+    QWEN2_5VL = "qwen2.5vl:32b"
     O1 = "o1"
     O3 = "o3"
     O4 = "o4"
@@ -90,6 +92,9 @@ class ModelFamily:
         "mistral",
         "ministral",
         "pixtral",
+        # qwen_models
+        "qwen3:32b",
+        "qwen2.5vl:32b",
         # unknown
         "unknown",
     ]

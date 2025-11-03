@@ -1,5 +1,7 @@
 .docusaurus/
 node_modules/
+Results*/
+apptainer-overlays/
 # Project
 /.vs
 # Visual Studio 2015/2017 cache/options directory

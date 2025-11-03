@@ -8,6 +8,7 @@ import contextvars
 import builtins
 import shutil
 import json
+import time
 from datetime import datetime
 from typing import List, Optional, Dict
 from collections import deque
@@ -295,6 +296,7 @@ async def main(num_teams: int, num_answers: int) -> None:
     teams = []
     async_tasks = []
     tokens = []
+    team_directories_to_cleanup = []  # Track directories for cleanup
     for team_idx in range(num_teams):
         # Set up the team
         coder = MagenticOneCoderAgent(
@@ -309,11 +311,20 @@ async def main(num_teams: int, num_answers: int) -> None:
             model_client = file_surfer_client,
         )
 
+        # Create team-specific downloads folder
+        team_downloads_folder = f"downloads_team_{team_idx}"
+        os.makedirs(team_downloads_folder, exist_ok=True)
+        team_debug_dir = os.path.join(logs_dir, f"team_{team_idx}")
+        os.makedirs(team_debug_dir, exist_ok=True)
+        # Track directories for cleanup
+        team_directories_to_cleanup.append(team_downloads_folder)
+        team_directories_to_cleanup.append(team_debug_dir)
+
         web_surfer = MultimodalWebSurfer(
             name="WebSurfer",
             model_client = web_surfer_client,
-            downloads_folder=os.getcwd(),
-            debug_dir=logs_dir,
+            downloads_folder=team_downloads_folder,
+            debug_dir=team_debug_dir,
             to_save_screenshots=True,
         )
         team = MagenticOneGroupChat(
@@ -349,12 +360,47 @@ If you are asked for a comma separated list, apply the above rules depending on 
         )
         async_tasks.append(async_task)
 
+    # Record start time for tracking first completing team
+    start_time = time.time()
+    first_team_saved = False
+
     # Wait until at least num_answers tasks have completed.
     team_results = {}
     for future in asyncio.as_completed(async_tasks):
         try:
             team_id, result = await future
             team_results[team_id] = result
+            
+            # Save the answer and runtime of the first completing team
+            if not first_team_saved:
+                end_time = time.time()
+                runtime = end_time - start_time
+                
+                # Extract the answer from the team result (matching pattern from aggregate_final_answer)
+                answer = ""
+                if result.messages:
+                    last_message = result.messages[-1]
+                    if hasattr(last_message, 'content'):
+                        answer = str(last_message.content)
+                    elif hasattr(last_message, 'to_model_text'):
+                        answer = last_message.to_model_text()
+                
+                # Save to file
+                first_team_data = {
+                    "team_id": team_id,
+                    "answer": answer,
+                    "runtime_seconds": runtime,
+                    "stop_reason": result.stop_reason if hasattr(result, 'stop_reason') else None
+                }
+                
+                with open("first_team_completion.json", "w") as f:
+                    json.dump(first_team_data, f, indent=2)
+                
+                print(f"First completing team (Team {team_id}) saved:")
+                print(f"  Runtime: {runtime:.2f} seconds")
+                print(f"  Answer: {answer[:200]}..." if len(answer) > 200 else f"  Answer: {answer}")
+                
+                first_team_saved = True
         except Exception as e:
             # Optionally log exception.
             print(f"Task raised an exception: {e}")
@@ -372,9 +418,17 @@ If you are asked for a comma separated list, apply the above rules depending on 
     final_answer = await aggregate_final_answer(prompt, orchestrator_client, team_results)
     print(final_answer)
 
+    # Cleanup team-specific directories
+    for directory in team_directories_to_cleanup:
+        if os.path.exists(directory):
+            try:
+                shutil.rmtree(directory)
+            except Exception as e:
+                print(f"Warning: Failed to clean up directory {directory}: {e}")
+
 if __name__ == "__main__":
-    num_teams = 3
-    num_answers = 3
+    num_teams = 5
+    num_answers = 5
 
     agentchat_trace_logger.setLevel(logging.DEBUG)
     file_handler = logging.FileHandler("trace.log", mode="w")

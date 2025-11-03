@@ -7,27 +7,42 @@
 ###############################
 # Open AI model configuration #
 ###############################
-model_config: &client
-  provider: autogen_ext.models.openai.OpenAIChatCompletionClient
-  config:
-    model: gpt-4o
+# model_config: &client
+#   provider: autogen_ext.models.openai.OpenAIChatCompletionClient
+#   config:
+#     model: gpt-5-nano
 
 
 ##############################
 # Ollama model configuration #
 ##############################
-#model_config: &client
-#    provider: autogen_ext.models.openai.OpenAIChatCompletionClient
-#    config:
-#      model: deepseek-r1:7b
-#      base_url: http://localhost:11434/v1/
-#      api_key: ollama
-#      model_info:
-#        function_calling: false
-#        json_output: false
-#        vision: false
-#        family: r1
-#
+model_config: &client
+   provider: autogen_ext.models.openai.OpenAIChatCompletionClient
+   config:
+     model: qwen3:32b
+     base_url: http://localhost:11434/v1/
+     api_key: ollama
+     model_info:
+       function_calling: true
+       json_output: true
+       vision: false
+       family: qwen
+       structured_output: true
+
+
+# model_config: &client
+#   provider: autogen_ext.models.openai.OpenAIChatCompletionClient
+#   config:
+#     model: qwen2.5vl:32b
+#     base_url: https://b1de0f06d9bf.ngrok-free.app/v1/chat/
+#     api_key: ollama
+#     model_info:
+#       function_calling: true
+#       json_output: true
+#       vision: true
+#       family: qwen
+#       structured_output: true
+
 
 #######################
 # Used by MagenticOne #
